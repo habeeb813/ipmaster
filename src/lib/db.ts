@@ -88,6 +88,25 @@ class FirestoreQueryChain<T> implements PromiseLike<T[]> {
   }
 }
 
+class FirestoreSingleQueryChain<T> implements PromiseLike<T | null> {
+  private promise: Promise<T | null>;
+
+  constructor(promise: Promise<T | null>) {
+    this.promise = promise;
+  }
+
+  lean(): FirestoreSingleQueryChain<T> {
+    return this;
+  }
+
+  then<TResult1 = T | null, TResult2 = never>(
+    onfulfilled?: ((value: T | null) => TResult1 | PromiseLike<TResult1>) | undefined | null,
+    onrejected?: ((reason: any) => TResult2 | PromiseLike<TResult2>) | undefined | null
+  ): Promise<TResult1 | TResult2> {
+    return this.promise.then(onfulfilled, onrejected);
+  }
+}
+
 class FirestoreCollection<T> {
   private colName: string;
   private fallbackData: T[];
@@ -131,9 +150,12 @@ class FirestoreCollection<T> {
     return new FirestoreQueryChain<T>(promise);
   }
 
-  async findOne(filter: any = {}): Promise<T | null> {
-    const list = await this.find(filter);
-    return list.length > 0 ? list[0] : null;
+  findOne(filter: any = {}): FirestoreSingleQueryChain<T> {
+    const promise = (async () => {
+      const list = await this.find(filter);
+      return list.length > 0 ? list[0] : null;
+    })();
+    return new FirestoreSingleQueryChain<T>(promise);
   }
 
   async countDocuments(filter: any = {}): Promise<number> {
