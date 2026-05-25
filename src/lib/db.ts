@@ -1,137 +1,321 @@
-import mongoose from 'mongoose';
-import { BLOG_POSTS } from '@/data/blogs';
-import { FAQS } from '@/data/faqs';
+import { initializeApp, getApps } from 'firebase/app';
+import { 
+  getFirestore, 
+  collection, 
+  getDocs, 
+  doc, 
+  getDoc, 
+  setDoc, 
+  addDoc, 
+  updateDoc, 
+  deleteDoc
+} from 'firebase/firestore';
+import { BLOG_POSTS, BlogPost } from '@/data/blogs';
+import { FAQS, FAQ } from '@/data/faqs';
+import bcrypt from 'bcryptjs';
 
-const MONGODB_URI = process.env.MONGODB_URI || 'mongodb://localhost:27017/ipmaster';
+// Firebase Client Credentials (with safe local/demo configuration fallbacks)
+const firebaseConfig = {
+  apiKey: process.env.FIREBASE_API_KEY || "dummy-api-key",
+  authDomain: process.env.FIREBASE_AUTH_DOMAIN || "ipmaster-demo.firebaseapp.com",
+  projectId: process.env.FIREBASE_PROJECT_ID || "ipmaster-demo",
+  storageBucket: process.env.FIREBASE_STORAGE_BUCKET || "ipmaster-demo.appspot.com",
+  messagingSenderId: process.env.FIREBASE_MESSAGING_SENDER_ID || "1234567890",
+  appId: process.env.FIREBASE_APP_ID || "1:1234567890:web:abcdef123456"
+};
 
-if (!MONGODB_URI) {
-  throw new Error('Please define the MONGODB_URI environment variable inside .env.local');
-}
+// Initialize Firebase client instance
+const app = getApps().length === 0 ? initializeApp(firebaseConfig) : getApps()[0];
+export const db = getFirestore(app);
 
 /**
- * Global is used here to maintain a cached connection across hot reloads
- * in development. This prevents connections growing exponentially
- * during API Route usage.
+ * Emulates connectToDatabase from Mongoose
  */
-let cached = (global as any).mongoose;
-
-if (!cached) {
-  cached = (global as any).mongoose = { conn: null, promise: null };
-}
-
 export async function connectToDatabase() {
-  if (cached.conn) {
-    return cached.conn;
-  }
-
-  if (!cached.promise) {
-    const opts = {
-      bufferCommands: false,
-    };
-
-    cached.promise = mongoose.connect(MONGODB_URI, opts).then((mongooseInstance) => {
-      return mongooseInstance;
-    });
-  }
-
   try {
-    cached.conn = await cached.promise;
-  } catch (e) {
-    cached.promise = null;
-    throw e;
+    await seedDatabase();
+  } catch (err) {
+    console.warn('Firebase firestore autoseeder skipped or pending network:', err);
+  }
+  return db;
+}
+
+// =========================================================
+// 1. MONGOOSE QUERY EMULATOR CLASS FOR FIREBASE FIRESTORE
+// =========================================================
+
+class FirestoreQueryChain<T> implements PromiseLike<T[]> {
+  private promise: Promise<T[]>;
+
+  constructor(promise: Promise<T[]>) {
+    this.promise = promise;
   }
 
-  // Seed initial data if database is empty
-  await seedDatabase();
+  sort(sortObj: any): FirestoreQueryChain<T> {
+    const key = Object.keys(sortObj)[0] || 'createdAt';
+    const direction = sortObj[key]; // -1 = desc, 1 = asc
+    
+    const sortedPromise = this.promise.then(list => {
+      return [...list].sort((a: any, b: any) => {
+        let valA = a[key];
+        let valB = b[key];
 
-  return cached.conn;
+        // Safe date formatting conversion
+        if (valA instanceof Date) valA = valA.getTime();
+        else if (typeof valA === 'string' && Date.parse(valA)) valA = new Date(valA).getTime();
+        
+        if (valB instanceof Date) valB = valB.getTime();
+        else if (typeof valB === 'string' && Date.parse(valB)) valB = new Date(valB).getTime();
+
+        if (valA < valB) return direction === -1 ? 1 : -1;
+        if (valA > valB) return direction === -1 ? -1 : 1;
+        return 0;
+      });
+    });
+
+    return new FirestoreQueryChain<T>(sortedPromise);
+  }
+
+  lean(): FirestoreQueryChain<T> {
+    return this;
+  }
+
+  then<TResult1 = T[], TResult2 = never>(
+    onfulfilled?: ((value: T[]) => TResult1 | PromiseLike<TResult1>) | undefined | null,
+    onrejected?: ((reason: any) => TResult2 | PromiseLike<TResult2>) | undefined | null
+  ): Promise<TResult1 | TResult2> {
+    return this.promise.then(onfulfilled, onrejected);
+  }
+}
+
+class FirestoreCollection<T> {
+  private colName: string;
+  private fallbackData: T[];
+
+  constructor(colName: string, fallbackData: T[] = []) {
+    this.colName = colName;
+    this.fallbackData = fallbackData;
+  }
+
+  find(filter: any = {}): FirestoreQueryChain<T> {
+    const promise = (async () => {
+      try {
+        const colRef = collection(db, this.colName);
+        const snapshot = await getDocs(colRef);
+        const list = snapshot.docs.map(doc => {
+          const data = doc.data();
+          return {
+            id: doc.id,
+            _id: doc.id,
+            ...data,
+            // Hydrate date structures if stored as Firestore timestamps
+            createdAt: data.createdAt?.toDate ? data.createdAt.toDate() : (data.createdAt || new Date())
+          };
+        }) as T[];
+
+        // Emulate basic MongoDB exact queries
+        return list.filter(item => {
+          for (const key in filter) {
+            if (filter[key] !== undefined && (item as any)[key] !== filter[key]) {
+              return false;
+            }
+          }
+          return true;
+        });
+      } catch (err) {
+        console.warn(`Firestore query for '${this.colName}' failed, falling back to local memory static data.`);
+        return this.fallbackData;
+      }
+    })();
+
+    return new FirestoreQueryChain<T>(promise);
+  }
+
+  async findOne(filter: any = {}): Promise<T | null> {
+    const list = await this.find(filter);
+    return list.length > 0 ? list[0] : null;
+  }
+
+  async countDocuments(filter: any = {}): Promise<number> {
+    const list = await this.find(filter);
+    return list.length;
+  }
+
+  async create(data: any): Promise<T> {
+    try {
+      const colRef = collection(db, this.colName);
+      // Determine unique natural document identifiers
+      const docId = data.username || data.slug || data.name || data._id || data.id;
+      const cleanData = { ...data, createdAt: data.createdAt || new Date() };
+
+      if (docId) {
+        const docRef = doc(db, this.colName, String(docId));
+        await setDoc(docRef, cleanData);
+        return { id: docId, _id: docId, ...cleanData } as T;
+      } else {
+        const docRef = await addDoc(colRef, cleanData);
+        return { id: docRef.id, _id: docRef.id, ...cleanData } as T;
+      }
+    } catch (err) {
+      console.error(`Firestore write for '${this.colName}' failed:`, err);
+      throw err;
+    }
+  }
+
+  async findOneAndUpdate(filter: any, update: any, options: any = {}): Promise<T | null> {
+    try {
+      const target = await this.findOne(filter);
+      const updateData = update.$set || update; // support mongoose $set format
+
+      if (!target) {
+        if (options.upsert) {
+          const merged = { ...filter, ...updateData };
+          return await this.create(merged);
+        }
+        return null;
+      }
+
+      const id = (target as any)._id || (target as any).slug || (target as any).name || (target as any).username;
+      const docRef = doc(db, this.colName, String(id));
+
+      const cleanUpdate: any = {};
+      for (const k in updateData) {
+        if (updateData[k] !== undefined) {
+          cleanUpdate[k] = updateData[k];
+        }
+      }
+
+      await updateDoc(docRef, cleanUpdate);
+      return await this.findOne(filter);
+    } catch (err) {
+      console.error(`Firestore findOneAndUpdate failed:`, err);
+      throw err;
+    }
+  }
+
+  async deleteOne(filter: any = {}): Promise<{ deletedCount: number }> {
+    try {
+      const target = await this.findOne(filter);
+      if (target) {
+        const id = (target as any)._id || (target as any).slug || (target as any).name || (target as any).username;
+        const docRef = doc(db, this.colName, String(id));
+        await deleteDoc(docRef);
+        return { deletedCount: 1 };
+      }
+      return { deletedCount: 0 };
+    } catch (err) {
+      console.error(`Firestore deleteOne failed:`, err);
+      throw err;
+    }
+  }
+
+  // Lead-specific Mongoose methods emulation
+  async findById(id: string): Promise<T | null> {
+    try {
+      const docRef = doc(db, this.colName, id);
+      const snap = await getDoc(docRef);
+      if (snap.exists()) {
+        return { id: snap.id, _id: snap.id, ...snap.data() } as T;
+      }
+      return null;
+    } catch (err) {
+      const list = await this.find();
+      return list.find((item: any) => item._id === id || item.id === id) || null;
+    }
+  }
+
+  async findByIdAndUpdate(id: string, update: any): Promise<T | null> {
+    try {
+      const docRef = doc(db, this.colName, id);
+      const updateData = update.$set || update;
+      
+      const cleanUpdate: any = {};
+      for (const k in updateData) {
+        if (updateData[k] !== undefined) {
+          cleanUpdate[k] = updateData[k];
+        }
+      }
+
+      await updateDoc(docRef, cleanUpdate);
+      return await this.findById(id);
+    } catch (err) {
+      console.error(`Firestore findByIdAndUpdate failed:`, err);
+      throw err;
+    }
+  }
+
+  async findByIdAndDelete(id: string): Promise<any> {
+    try {
+      const docRef = doc(db, this.colName, id);
+      await deleteDoc(docRef);
+      return { ok: true };
+    } catch (err) {
+      console.error(`Firestore findByIdAndDelete failed:`, err);
+      throw err;
+    }
+  }
 }
 
 // ==========================================
-// 1. SCHEMAS & MODELS DEFINITIONS
+// 2. EXPORT INSTANTIATED COMPATIBLE COLLECTIONS
 // ==========================================
 
-// --- USER SCHEMA (Admin) ---
-const UserSchema = new mongoose.Schema({
-  username: { type: String, required: true, unique: true },
-  password: { type: String, required: true },
-  role: { type: String, default: 'Super Administrator' },
-  createdAt: { type: Date, default: Date.now },
-});
+export const User = new FirestoreCollection<any>('users');
+export const Blog = new FirestoreCollection<BlogPost>('blogs', BLOG_POSTS);
+export const Category = new FirestoreCollection<any>('categories', [
+  { name: 'Trademarks' },
+  { name: 'Patents' },
+  { name: 'Copyrights' },
+  { name: 'Brand Protection' },
+  { name: 'Startup Compliance' }
+]);
+export const Faq = new FirestoreCollection<FAQ>('faqs', FAQS);
 
-export const User = mongoose.models.User || mongoose.model('User', UserSchema);
-
-// --- BLOG SCHEMA ---
-const BlogSchema = new mongoose.Schema({
-  slug: { type: String, required: true, unique: true },
-  title: { type: String, required: true },
-  excerpt: { type: String, required: true },
-  content: { type: String, required: true },
-  category: { type: String, required: true },
-  imageUrl: { type: String, required: true },
-  author: {
-    name: { type: String, required: true },
-    role: { type: String, required: true },
-    avatar: { type: String, required: true },
+// Pre-hydrate mock leads for offline/fallback mode
+const initialMockLeads = [
+  {
+    _id: 'aravind-lead-123',
+    name: 'Aravind Swamy',
+    email: 'aravind@swamytech.io',
+    phone: '+91 98450 12345',
+    service: 'patent-filing',
+    date: '2026-06-02',
+    time: '11:00 AM',
+    status: 'New',
+    createdAt: new Date('2026-05-25T14:30:00Z')
   },
-  publishedAt: { type: String, required: true },
-  readTime: { type: String, required: true },
-  faqBlock: [
-    {
-      question: { type: String, required: true },
-      answer: { type: String, required: true },
-    }
-  ],
-  keywords: [{ type: String }],
-  metaTitle: { type: String, required: true },
-  metaDescription: { type: String, required: true },
-  createdAt: { type: Date, default: Date.now },
-});
-
-export const Blog = mongoose.models.Blog || mongoose.model('Blog', BlogSchema);
-
-// --- CATEGORY SCHEMA ---
-const CategorySchema = new mongoose.Schema({
-  name: { type: String, required: true, unique: true },
-  createdAt: { type: Date, default: Date.now },
-});
-
-export const Category = mongoose.models.Category || mongoose.model('Category', CategorySchema);
-
-// --- FAQ SCHEMA ---
-const FaqSchema = new mongoose.Schema({
-  slug: { type: String, required: true, unique: true },
-  question: { type: String, required: true },
-  answer: { type: String, required: true },
-  detailedAnswer: { type: String },
-  category: { type: String, required: true },
-  createdAt: { type: Date, default: Date.now },
-});
-
-export const Faq = mongoose.models.Faq || mongoose.model('Faq', FaqSchema);
-
-// --- LEAD SCHEMA ---
-const LeadSchema = new mongoose.Schema({
-  name: { type: String, required: true },
-  email: { type: String, required: true },
-  phone: { type: String, required: true },
-  service: { type: String, required: true },
-  date: { type: String, required: true },
-  time: { type: String, required: true },
-  status: { type: String, enum: ['New', 'Contacted', 'Closed'], default: 'New' },
-  createdAt: { type: Date, default: Date.now },
-});
-
-export const Lead = mongoose.models.Lead || mongoose.model('Lead', LeadSchema);
+  {
+    _id: 'priyanka-lead-456',
+    name: 'Priyanka Sen',
+    email: 'priyanka@cosmederma.in',
+    phone: '+91 99020 98765',
+    service: 'trademark-registration',
+    date: '2026-06-03',
+    time: '03:30 PM',
+    status: 'Contacted',
+    createdAt: new Date('2026-05-24T09:15:00Z')
+  },
+  {
+    _id: 'devendra-lead-789',
+    name: 'Devendra Mehta',
+    email: 'dev@mehtamanufacturing.com',
+    phone: '+91 98800 55443',
+    service: 'iso-certification',
+    date: '2026-06-04',
+    time: '10:00 AM',
+    status: 'Closed',
+    createdAt: new Date('2026-05-23T11:45:00Z')
+  }
+];
+export const Lead = new FirestoreCollection<any>('leads', initialMockLeads);
 
 // ==========================================
-// 2. AUTOMATIC DATABASE SEEDER
+// 3. AUTOMATIC DATABASE SEEDER (FIRESTORE)
 // ==========================================
-import bcrypt from 'bcryptjs';
 
 async function seedDatabase() {
   try {
-    // 1. Seed Admin User if not exists
+    // 1. Seed Admin User
     const adminCount = await User.countDocuments();
     if (adminCount === 0) {
       const hashedPassword = await bcrypt.hash('ipmaster123', 10);
@@ -139,71 +323,48 @@ async function seedDatabase() {
         username: 'admin',
         password: hashedPassword,
         role: 'Super Administrator',
+        createdAt: new Date()
       });
-      console.log('Seeded default admin credentials (admin / ipmaster123)');
+      console.log('Successfully seeded Super Admin (admin / ipmaster123) inside Firestore.');
     }
 
-    // 2. Seed Blogs if empty
+    // 2. Seed Blogs
     const blogCount = await Blog.countDocuments();
     if (blogCount === 0) {
-      await Blog.insertMany(BLOG_POSTS);
-      console.log('Seeded default blogs');
+      for (const p of BLOG_POSTS) {
+        await Blog.create(p);
+      }
+      console.log('Seeded default blog posts inside Firestore.');
     }
 
-    // 3. Seed Categories if empty
+    // 3. Seed Categories
     const categoryCount = await Category.countDocuments();
     if (categoryCount === 0) {
       const initialCategories = ['Trademarks', 'Patents', 'Copyrights', 'Brand Protection', 'Startup Compliance'];
-      await Category.insertMany(initialCategories.map(name => ({ name })));
-      console.log('Seeded initial categories');
+      for (const cat of initialCategories) {
+        await Category.create({ name: cat });
+      }
+      console.log('Seeded dynamic taxonomy categories inside Firestore.');
     }
 
-    // 4. Seed FAQs if empty
+    // 4. Seed FAQs
     const faqCount = await Faq.countDocuments();
     if (faqCount === 0) {
-      await Faq.insertMany(FAQS);
-      console.log('Seeded default FAQs');
+      for (const f of FAQS) {
+        await Faq.create(f);
+      }
+      console.log('Seeded dynamic FAQ questions inside Firestore.');
     }
 
-    // 5. Seed Leads if empty
+    // 5. Seed Leads
     const leadCount = await Lead.countDocuments();
     if (leadCount === 0) {
-      const mockLeads = [
-        {
-          name: 'Aravind Swamy',
-          email: 'aravind@swamytech.io',
-          phone: '+91 98450 12345',
-          service: 'patent-filing',
-          date: '2026-06-02',
-          time: '11:00 AM',
-          status: 'New',
-          createdAt: new Date('2026-05-25T14:30:00Z')
-        },
-        {
-          name: 'Priyanka Sen',
-          email: 'priyanka@cosmederma.in',
-          phone: '+91 99020 98765',
-          service: 'trademark-registration',
-          date: '2026-06-03',
-          time: '03:30 PM',
-          status: 'Contacted',
-          createdAt: new Date('2026-05-24T09:15:00Z')
-        },
-        {
-          name: 'Devendra Mehta',
-          email: 'dev@mehtamanufacturing.com',
-          phone: '+91 98800 55443',
-          service: 'iso-certification',
-          date: '2026-06-04',
-          time: '10:00 AM',
-          status: 'Closed',
-          createdAt: new Date('2026-05-23T11:45:00Z')
-        }
-      ];
-      await Lead.insertMany(mockLeads);
-      console.log('Seeded default leads');
+      for (const l of initialMockLeads) {
+        await Lead.create(l);
+      }
+      console.log('Seeded active consultation leads inside Firestore.');
     }
   } catch (err) {
-    console.error('Error during database seeding:', err);
+    console.error('Error checking or seeding Firebase Firestore database:', err);
   }
 }
