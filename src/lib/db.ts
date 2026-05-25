@@ -256,22 +256,66 @@ class FirestoreCollection<T> {
   }
 }
 
-// ==========================================
-// 2. EXPORT INSTANTIATED COMPATIBLE COLLECTIONS
-// ==========================================
+// =========================================================
+// 2. MONGOOSE-LIKE CONSTRUCTABLE CLASS DEFINITIONS
+// =========================================================
 
-export const User = new FirestoreCollection<any>('users');
-export const Blog = new FirestoreCollection<BlogPost>('blogs', BLOG_POSTS);
-export const Category = new FirestoreCollection<any>('categories', [
+class MongooseModelBase {
+  [key: string]: any;
+  private _collection: FirestoreCollection<any>;
+
+  constructor(data: any, collection: FirestoreCollection<any>) {
+    Object.assign(this, data);
+    this._collection = collection;
+  }
+
+  async save() {
+    return await this._collection.create(this);
+  }
+}
+
+export class UserModel extends MongooseModelBase {
+  constructor(data: any) {
+    super(data, usersCollection);
+  }
+}
+
+export class BlogModel extends MongooseModelBase {
+  constructor(data: any) {
+    super(data, blogsCollection);
+  }
+}
+
+export class CategoryModel extends MongooseModelBase {
+  constructor(data: any) {
+    super(data, categoriesCollection);
+  }
+}
+
+export class FaqModel extends MongooseModelBase {
+  constructor(data: any) {
+    super(data, faqsCollection);
+  }
+}
+
+export class LeadModel extends MongooseModelBase {
+  constructor(data: any) {
+    super(data, leadsCollection);
+  }
+}
+
+// Instantiated underlying Firestore collections
+const usersCollection = new FirestoreCollection<any>('users');
+const blogsCollection = new FirestoreCollection<BlogPost>('blogs', BLOG_POSTS);
+const categoriesCollection = new FirestoreCollection<any>('categories', [
   { name: 'Trademarks' },
   { name: 'Patents' },
   { name: 'Copyrights' },
   { name: 'Brand Protection' },
   { name: 'Startup Compliance' }
 ]);
-export const Faq = new FirestoreCollection<FAQ>('faqs', FAQS);
+const faqsCollection = new FirestoreCollection<FAQ>('faqs', FAQS);
 
-// Pre-hydrate mock leads for offline/fallback mode
 const initialMockLeads = [
   {
     _id: 'aravind-lead-123',
@@ -307,11 +351,21 @@ const initialMockLeads = [
     createdAt: new Date('2026-05-23T11:45:00Z')
   }
 ];
-export const Lead = new FirestoreCollection<any>('leads', initialMockLeads);
+const leadsCollection = new FirestoreCollection<any>('leads', initialMockLeads);
 
-// ==========================================
-// 3. AUTOMATIC DATABASE SEEDER (FIRESTORE)
-// ==========================================
+// =========================================================
+// 3. EXPORT COMPATIBLE WRAPPER OBJECTS (CONSTRUCTORS + QUERIES)
+// =========================================================
+
+export const User = Object.assign(UserModel, usersCollection) as typeof UserModel & FirestoreCollection<any>;
+export const Blog = Object.assign(BlogModel, blogsCollection) as typeof BlogModel & FirestoreCollection<BlogPost>;
+export const Category = Object.assign(CategoryModel, categoriesCollection) as typeof CategoryModel & FirestoreCollection<any>;
+export const Faq = Object.assign(FaqModel, faqsCollection) as typeof FaqModel & FirestoreCollection<FAQ>;
+export const Lead = Object.assign(LeadModel, leadsCollection) as typeof LeadModel & FirestoreCollection<any>;
+
+// =========================================================
+// 4. AUTOMATIC DATABASE SEEDER (FIRESTORE)
+// =========================================================
 
 async function seedDatabase() {
   try {
