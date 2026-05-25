@@ -13,17 +13,17 @@ export async function getAllBlogs(): Promise<BlogPost[]> {
       // Format _id to string for serialization
       return dbBlogs.map((b: any) => ({
         ...b,
-        _id: b._id.toString(),
+        _id: b._id ? b._id.toString() : (b.id || b.slug || ''),
       })) as BlogPost[];
     }
   } catch (err) {
-    console.warn('MongoDB query failed, falling back to static blog posts:', err);
+    console.warn('Firebase query failed, falling back to static blog posts:', err);
   }
   return BLOG_POSTS;
 }
 
 /**
- * Fetch a single blog by slug from MongoDB, falling back to static BLOG_POSTS array.
+ * Fetch a single blog by slug from MongoDB/Firestore, falling back to static BLOG_POSTS array.
  */
 export async function getBlogBySlug(slug: string): Promise<BlogPost | null> {
   try {
@@ -32,11 +32,11 @@ export async function getBlogBySlug(slug: string): Promise<BlogPost | null> {
     if (post) {
       return {
         ...post,
-        _id: (post as any)._id.toString(),
+        _id: (post as any)._id ? (post as any)._id.toString() : ((post as any).id || (post as any).slug || ''),
       } as BlogPost;
     }
   } catch (err) {
-    console.warn(`MongoDB single blog query for ${slug} failed, falling back to static array:`, err);
+    console.warn(`Firebase single blog query for ${slug} failed, falling back to static array:`, err);
   }
   
   const fallback = BLOG_POSTS.find((p) => p.slug === slug);
@@ -44,7 +44,7 @@ export async function getBlogBySlug(slug: string): Promise<BlogPost | null> {
 }
 
 /**
- * Fetch all FAQs from MongoDB, falling back to static FAQS array.
+ * Fetch all FAQs from MongoDB/Firestore, falling back to static FAQS array.
  */
 export async function getAllFaqs(): Promise<FAQ[]> {
   try {
@@ -53,11 +53,11 @@ export async function getAllFaqs(): Promise<FAQ[]> {
     if (dbFaqs && dbFaqs.length > 0) {
       return dbFaqs.map((f: any) => ({
         ...f,
-        _id: f._id.toString(),
+        _id: f._id ? f._id.toString() : (f.id || f.slug || ''),
       })) as FAQ[];
     }
   } catch (err) {
-    console.warn('MongoDB FAQ query failed, falling back to static FAQs:', err);
+    console.warn('Firebase FAQ query failed, falling back to static FAQs:', err);
   }
   return FAQS;
 }

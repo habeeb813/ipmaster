@@ -45,13 +45,14 @@ export async function POST(req: Request) {
     }
 
     // Sign cryptographic JWT token
-    const token = signToken({ userId: user._id.toString(), username: user.username });
+    const userId = user._id ? user._id.toString() : (user.id || user.username || '');
+    const token = signToken({ userId, username: user.username });
 
     return NextResponse.json({
       success: true,
       token,
       user: {
-        id: user._id.toString(),
+        id: userId,
         username: user.username,
         role: user.role,
       }
