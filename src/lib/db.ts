@@ -224,7 +224,7 @@ class FirestoreCollection<T> {
     }
   }
 
-  async findByIdAndUpdate(id: string, update: any): Promise<T | null> {
+  async findByIdAndUpdate(id: string, update: any, options: any = {}): Promise<T | null> {
     try {
       const docRef = doc(db, this.colName, id);
       const updateData = update.$set || update;
